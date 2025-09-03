@@ -239,7 +239,7 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
         .delete()
         .eq('id', taskId);
 
-      if (error) throw error;
+      if (deleteError) throw deleteError;
 
       setTasks(prev => prev.filter(task => task.id !== taskId));
       callbacks?.onTaskDeleted?.(taskId);
@@ -322,7 +322,7 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
       setError(err instanceof Error ? err.message : 'Failed to update lane');
       throw err;
     }
-  }
+  };
 
   const deleteLane = async (laneId: string) => {
     try {
@@ -394,6 +394,14 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
       throw err;
     }
   };
+
+  const moveTask = async (taskId: string, targetLaneId: string, targetPosition: number) => {
+    try {
+      const taskToMove = tasks.find(t => t.id === taskId);
+      if (!taskToMove) throw new Error('Task not found');
+
+      const oldLaneId = taskToMove.laneId;
+      const oldPosition = taskToMove.position;
 
       if (oldLaneId === targetLaneId) {
         // Moving within same lane - reorder positions
