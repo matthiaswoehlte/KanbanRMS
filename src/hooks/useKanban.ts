@@ -400,62 +400,78 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
       const taskToMove = tasks.find(t => t.id === taskId);
       if (!taskToMove) throw new Error('Task not found');
 
-      // Step 1: Move task to temporary position to avoid constraint conflicts
-      const tempPosition = 99999;
-      await supabase
-        .from('tasks')
-        .update({ position: tempPosition })
-        .eq('id', taskId);
+      const oldLaneId = taskToMove.laneId;
+      const oldPosition = taskToMove.position;
 
-      // Step 2: Shift other tasks to make room
-      const targetLaneTasks = tasks.filter(t => t.laneId === targetLaneId && t.id !== taskId);
-      const tasksToShift = targetLaneTasks.filter(t => t.position >= targetPosition);
-      
-      for (const task of tasksToShift) {
-        await supabase
+      if (oldLaneId === targetLaneId) {
+        // Moving within same lane - reorder positions
+        if (oldPosition === targetPosition) return; // No change needed
+
+        if (oldPosition < targetPosition) {
+          // Moving down: shift tasks between old and new position up
+          const { error: shiftError } = await supabase
+            .from('tasks')
+            .update({ position: supabase.raw('position - 1') })
+            .eq('lane_id', targetLaneId)
+            .gt('position', oldPosition)
+            .lte('position', targetPosition);
+          
+          if (shiftError) throw shiftError;
+        } else {
+          // Moving up: shift tasks between new and old position down
+          const { error: shiftError } = await supabase
+            .from('tasks')
+            .update({ position: supabase.raw('position + 1') })
+            .eq('lane_id', targetLaneId)
+            .gte('position', targetPosition)
+            .lt('position', oldPosition);
+          
+          if (shiftError) throw shiftError;
+        }
+
+        // Update the moved task's position
+        const { error: updateError } = await supabase
           .from('tasks')
-          .update({ position: task.position + 1 })
-          .eq('id', task.id);
+          .update({ position: targetPosition })
+          .eq('id', taskId);
+
+        if (updateError) throw updateError;
+      } else {
+        // Moving between lanes
+        // First, shift tasks in target lane to make room
+        const { error: shiftError } = await supabase
+          .from('tasks')
+          .update({ position: supabase.raw('position + 1') })
+          .eq('lane_id', targetLaneId)
+          .gte('position', targetPosition);
+        
+        if (shiftError) throw shiftError;
+
+        // Move task to new lane and position
+        const targetLane = lanes.find(l => l.id === targetLaneId);
+        const { error: moveError } = await supabase
+          .from('tasks')
+          .update({
+            lane_id: targetLaneId,
+            status: targetLane?.name || 'Unknown',
+            position: targetPosition
+          })
+          .eq('id', taskId);
+
+        if (moveError) throw moveError;
+
+        // Finally, compact positions in the old lane
+        const { error: compactError } = await supabase
+          .from('tasks')
+          .update({ position: supabase.raw('position - 1') })
+          .eq('lane_id', oldLaneId)
+          .gt('position', oldPosition);
+        
+        if (compactError) throw compactError;
       }
 
-      // Step 3: Move task to final position with correct lane
-      const targetLane = lanes.find(l => l.id === targetLaneId);
-      const { data, error } = await supabase
-        .from('tasks')
-        .update({
-          lane_id: targetLaneId,
-          status: targetLane?.name || 'Unknown',
-          position: targetPosition
-        })
-        .eq('id', taskId)
-        .select(`
-          *,
-          resources(name, picture, thumbnail)
-        `)
-        .single();
-
-      if (error) throw error;
-
-      const updatedTask: Task = {
-        id: data.id,
-        projectId: data.project_id,
-        laneId: data.lane_id,
-        title: data.title,
-        description: data.description || '',
-        status: data.status,
-        resourceId: data.resource_id,
-        resourceName: data.resources?.name || null,
-        resourcePicture: data.resources?.picture || null,
-        resourceThumbnail: data.resources?.thumbnail || null,
-        position: data.position,
-        createdAt: data.created_at,
-        updatedAt: data.updated_at
-      };
-
-      // Refresh all data to ensure consistency
+      // Refresh data to ensure UI consistency
       await fetchKanbanData();
-      callbacks?.onTaskUpdated?.(updatedTask);
-      return updatedTask;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to move task');
       throw err;
