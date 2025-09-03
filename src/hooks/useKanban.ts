@@ -441,9 +441,6 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
         
         if (updateError) throw updateError;
       }
-          if (compactError) throw compactError;
-        }
-      }
 
       // Refresh data to ensure UI consistency
       await fetchKanbanData();
