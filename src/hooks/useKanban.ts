@@ -400,48 +400,25 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
       const taskToMove = tasks.find(t => t.id === taskId);
       if (!taskToMove) throw new Error('Task not found');
 
-      // Get all tasks in target lane
+      // Step 1: Move task to temporary position to avoid constraint conflicts
+      const tempPosition = 99999;
+      await supabase
+        .from('tasks')
+        .update({ position: tempPosition })
+        .eq('id', taskId);
+
+      // Step 2: Shift other tasks to make room
       const targetLaneTasks = tasks.filter(t => t.laneId === targetLaneId && t.id !== taskId);
+      const tasksToShift = targetLaneTasks.filter(t => t.position >= targetPosition);
       
-      // If moving to same lane, adjust positions
-      if (taskToMove.laneId === targetLaneId) {
-        // Moving within same lane - shift tasks between old and new position
-        const oldPosition = taskToMove.position;
-        if (oldPosition < targetPosition) {
-          // Moving down: shift tasks up
-          const tasksToShift = targetLaneTasks.filter(t => 
-            t.position > oldPosition && t.position <= targetPosition
-          );
-          for (const task of tasksToShift) {
-            await supabase
-              .from('tasks')
-              .update({ position: task.position - 1 })
-              .eq('id', task.id);
-          }
-        } else if (oldPosition > targetPosition) {
-          // Moving up: shift tasks down
-          const tasksToShift = targetLaneTasks.filter(t => 
-            t.position >= targetPosition && t.position < oldPosition
-          );
-          for (const task of tasksToShift) {
-            await supabase
-              .from('tasks')
-              .update({ position: task.position + 1 })
-              .eq('id', task.id);
-          }
-        }
-      } else {
-        // Moving to different lane - shift tasks in target lane down
-        const tasksToShift = targetLaneTasks.filter(t => t.position >= targetPosition);
-        for (const task of tasksToShift) {
-          await supabase
-            .from('tasks')
-            .update({ position: task.position + 1 })
-            .eq('id', task.id);
-        }
+      for (const task of tasksToShift) {
+        await supabase
+          .from('tasks')
+          .update({ position: task.position + 1 })
+          .eq('id', task.id);
       }
 
-      // Now update the moved task
+      // Step 3: Move task to final position with correct lane
       const targetLane = lanes.find(l => l.id === targetLaneId);
       const { data, error } = await supabase
         .from('tasks')
