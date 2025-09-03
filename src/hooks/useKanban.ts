@@ -443,7 +443,18 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
       }
 
       // Refresh data to ensure UI consistency
-      await fetchKanbanData();
+      // Update local state directly instead of reloading
+      setTasks(prev => prev.map(task => {
+        if (task.id === taskId) {
+          return {
+            ...task,
+            laneId: targetLaneId,
+            status: targetLane?.name || task.status,
+            position: targetPosition
+          };
+        }
+        return task;
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to move task');
       throw err;
