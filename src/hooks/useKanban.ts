@@ -400,94 +400,47 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
       const taskToMove = tasks.find(t => t.id === taskId);
       if (!taskToMove) throw new Error('Task not found');
 
-      const oldLaneId = taskToMove.laneId;
-      const oldPosition = taskToMove.position;
+      // 1. Move task to target lane
+      const targetLane = lanes.find(l => l.id === targetLaneId);
+      const { error: moveError } = await supabase
+        .from('tasks')
+        .update({
+          lane_id: targetLaneId,
+          status: targetLane?.name || 'Unknown'
+        })
+        .eq('id', taskId);
 
-      if (oldLaneId === targetLaneId) {
-        // Moving within same lane - reorder positions
-        if (oldPosition === targetPosition) return; // No change needed
+      if (moveError) throw moveError;
 
-        // Get all tasks in the lane except the one being moved
-        const laneTasks = tasks.filter(t => t.laneId === targetLaneId && t.id !== taskId);
-        
-        if (oldPosition < targetPosition) {
-          // Moving down: shift tasks between old and new position up by 1
-          const tasksToShift = laneTasks.filter(t => 
-            t.position > oldPosition && t.position <= targetPosition
-          );
-          
-          for (const task of tasksToShift) {
-            const { error: shiftError } = await supabase
-              .from('tasks')
-              .update({ position: task.position - 1 })
-              .eq('id', task.id);
-            
-            if (shiftError) throw shiftError;
-          }
-        } else {
-          // Moving up: shift tasks between new and old position down by 1
-          const tasksToShift = laneTasks.filter(t => 
-            t.position >= targetPosition && t.position < oldPosition
-          );
-          
-          for (const task of tasksToShift) {
-            const { error: shiftError } = await supabase
-              .from('tasks')
-              .update({ position: task.position + 1 })
-              .eq('id', task.id);
-            
-            if (shiftError) throw shiftError;
-          }
-        }
+      // 2. Get all tasks in target lane (including the moved task)
+      const { data: targetLaneTasks, error: fetchError } = await supabase
+        .from('tasks')
+        .select('id, position')
+        .eq('lane_id', targetLaneId)
+        .order('position', { ascending: true });
 
-        // Update the moved task's position
+      if (fetchError) throw fetchError;
+
+      // 3. Create new position array with moved task at target position
+      const taskIds = targetLaneTasks.map(t => t.id);
+      const movedTaskIndex = taskIds.indexOf(taskId);
+      
+      // Remove moved task from current position
+      taskIds.splice(movedTaskIndex, 1);
+      
+      // Insert at target position (convert to 0-based index)
+      const insertIndex = Math.min(targetPosition - 1, taskIds.length);
+      taskIds.splice(insertIndex, 0, taskId);
+
+      // 4. Update all positions sequentially
+      for (let i = 0; i < taskIds.length; i++) {
         const { error: updateError } = await supabase
           .from('tasks')
-          .update({ position: targetPosition })
-          .eq('id', taskId);
-
+          .update({ position: i + 1 })
+          .eq('id', taskIds[i]);
+        
         if (updateError) throw updateError;
-      } else {
-        // Moving between lanes
-        // Get tasks in target lane that need to be shifted
-        const targetLaneTasks = tasks.filter(t => 
-          t.laneId === targetLaneId && t.position >= targetPosition
-        );
-        
-        // Shift tasks in target lane to make room
-        for (const task of targetLaneTasks) {
-          const { error: shiftError } = await supabase
-            .from('tasks')
-            .update({ position: task.position + 1 })
-            .eq('id', task.id);
-          
-          if (shiftError) throw shiftError;
-        }
-
-        // Move task to new lane and position
-        const targetLane = lanes.find(l => l.id === targetLaneId);
-        const { error: moveError } = await supabase
-          .from('tasks')
-          .update({
-            lane_id: targetLaneId,
-            status: targetLane?.name || 'Unknown',
-            position: targetPosition
-          })
-          .eq('id', taskId);
-
-        if (moveError) throw moveError;
-
-        // Compact positions in the old lane
-        const oldLaneTasks = tasks.filter(t => 
-          t.laneId === oldLaneId && t.position > oldPosition
-        );
-        
-        for (const task of oldLaneTasks) {
-          const { error: compactError } = await supabase
-            .from('tasks')
-            .update({ position: task.position - 1 })
-            .eq('id', task.id);
-          
+      }
           if (compactError) throw compactError;
         }
       }
