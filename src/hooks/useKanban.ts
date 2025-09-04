@@ -400,58 +400,88 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
       const taskToMove = tasks.find(t => t.id === taskId);
       if (!taskToMove) throw new Error('Task not found');
 
-      // 1. Move task to target lane
-      const targetLane = lanes.find(l => l.id === targetLaneId);
-      const { error: moveError } = await supabase
-        .from('tasks')
-        .update({
-          lane_id: targetLaneId,
-          status: targetLane?.name || 'Unknown'
-        })
-        .eq('id', taskId);
-
-      if (moveError) throw moveError;
-
-      // 2. Get all tasks in target lane (including the moved task)
-      const { data: targetLaneTasks, error: fetchError } = await supabase
-        .from('tasks')
-        .select('id, position')
-        .eq('lane_id', targetLaneId)
-        .order('position', { ascending: true });
-
-      if (fetchError) throw fetchError;
-
-      // 3. Create new position array with moved task at target position
-      const taskIds = targetLaneTasks.map(t => t.id);
-      const movedTaskIndex = taskIds.indexOf(taskId);
-      
-      // Remove moved task from current position
-      taskIds.splice(movedTaskIndex, 1);
-      
-      // Insert at target position (convert to 0-based index)
-      const insertIndex = Math.min(targetPosition - 1, taskIds.length);
-      taskIds.splice(insertIndex, 0, taskId);
-
-      // 4. Update all positions sequentially
-      for (let i = 0; i < taskIds.length; i++) {
-        const { error: updateError } = await supabase
-          .from('tasks')
-          .update({ position: i + 1 })
-          .eq('id', taskIds[i]);
-        
-        if (updateError) throw updateError;
-      }
-      if (!taskToMove) {
-        setError('Task not found for move operation.');
-        return;
-      }
-
       const originalLaneId = taskToMove.laneId;
-      const originalPosition = taskToMove.position;
+      const targetLane = lanes.find(l => l.id === targetLaneId);
+      
+      // OPTIMISTIC UI UPDATE FIRST
+      const updatedTask = {
+        ...taskToMove,
+        laneId: targetLaneId,
+        status: targetLane?.name || 'Unknown',
+        position: targetPosition
+      };
 
-      // --- OPTIMISTIC UI UPDATE ---
-      // Create a mutable copy of tasks for local manipulation
-      const newTasks = [...tasks];
+      setTasks(prev => {
+        // Remove task from current position
+        const withoutMovedTask = prev.filter(t => t.id !== taskId);
+        
+        // Get tasks in target lane
+        const targetLaneTasks = withoutMovedTask.filter(t => t.laneId === targetLaneId);
+        
+        // Insert moved task at target position
+        const insertIndex = Math.min(targetPosition - 1, targetLaneTasks.length);
+        targetLaneTasks.splice(insertIndex, 0, updatedTask);
+        
+        // Renumber target lane tasks
+        const renumberedTargetTasks = targetLaneTasks.map((t, index) => ({
+          ...t,
+          position: index + 1
+        }));
+        
+        // Get tasks from other lanes
+        const otherLaneTasks = withoutMovedTask.filter(t => t.laneId !== targetLaneId);
+        
+        return [...otherLaneTasks, ...renumberedTargetTasks];
+      });
+
+      // DATABASE UPDATE AFTER UI UPDATE
+      try {
+        // 1. Move task to target lane
+        const { error: moveError } = await supabase
+          .from('tasks')
+          .update({
+            lane_id: targetLaneId,
+            status: targetLane?.name || 'Unknown'
+          })
+          .eq('id', taskId);
+
+        if (moveError) throw moveError;
+
+        // 2. Get all tasks in target lane and renumber them
+        const { data: targetLaneTasksData, error: fetchError } = await supabase
+          .from('tasks')
+          .select('id')
+          .eq('lane_id', targetLaneId)
+          .order('position', { ascending: true });
+
+        if (fetchError) throw fetchError;
+
+        // Create correct order with moved task at target position
+        const taskIds = targetLaneTasksData.map(t => t.id);
+        const movedTaskIndex = taskIds.indexOf(taskId);
+        
+        // Remove from current position
+        taskIds.splice(movedTaskIndex, 1);
+        
+        // Insert at target position
+        const insertIndex = Math.min(targetPosition - 1, taskIds.length);
+        taskIds.splice(insertIndex, 0, taskId);
+
+        // Update positions in database
+        for (let i = 0; i < taskIds.length; i++) {
+          const { error: updateError } = await supabase
+            .from('tasks')
+            .update({ position: i + 1 })
+            .eq('id', taskIds[i]);
+          
+          if (updateError) throw updateError;
+        }
+      } catch (dbError) {
+        console.error('Database update failed, reverting UI:', dbError);
+        // Revert UI by refetching from database
+        await fetchKanbanData();
+        throw dbError;
+      }
 
       // 1. Remove task from its original position in the local state
       let currentSourceLaneTasks = newTasks
