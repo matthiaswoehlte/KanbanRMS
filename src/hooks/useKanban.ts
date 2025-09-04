@@ -440,6 +440,7 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
           .eq('id', taskIds[i]);
         
         if (updateError) throw updateError;
+      }
       if (!taskToMove) {
         setError('Task not found for move operation.');
         return;
