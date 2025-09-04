@@ -440,24 +440,125 @@ export const useKanban = (projectId: string | null, callbacks?: KanbanCallbacks)
           .eq('id', taskIds[i]);
         
         if (updateError) throw updateError;
+      if (!taskToMove) {
+        setError('Task not found for move operation.');
+        return;
       }
 
-      // Refresh data to ensure UI consistency
-      // Update local state directly instead of reloading
-      setTasks(prev => prev.map(task => {
-        if (task.id === taskId) {
-          return {
-            ...task,
-            laneId: targetLaneId,
-            status: targetLane?.name || task.status,
-            position: targetPosition
-          };
-        }
-        return task;
+      const originalLaneId = taskToMove.laneId;
+      const originalPosition = taskToMove.position;
+
+      // --- OPTIMISTIC UI UPDATE ---
+      // Create a mutable copy of tasks for local manipulation
+      const newTasks = [...tasks];
+
+      // 1. Remove task from its original position in the local state
+      let currentSourceLaneTasks = newTasks
+        .filter(t => t.laneId === originalLaneId && t.id !== taskId)
+        .sort((a, b) => a.position - b.position);
+
+      // Re-index source lane tasks
+      currentSourceLaneTasks = currentSourceLaneTasks.map((t, index) => ({
+        ...t,
+        position: index + 1
       }));
+
+      // 2. Prepare task for insertion into target lane
+      const updatedTaskToMove = {
+        ...taskToMove,
+        laneId: targetLaneId,
+        status: lanes.find(l => l.id === targetLaneId)?.name || 'Unknown',
+        position: targetPosition // This will be the new position in the target lane
+      };
+
+      // 3. Get tasks in target lane (excluding the moved task if it's already there)
+      let currentTargetLaneTasks = newTasks
+        .filter(t => t.laneId === targetLaneId && t.id !== taskId)
+        .sort((a, b) => a.position - b.position);
+
+      // 4. Insert the moved task into the target lane at the specified position
+      currentTargetLaneTasks.splice(targetPosition - 1, 0, updatedTaskToMove);
+
+      // 5. Re-index target lane tasks
+      currentTargetLaneTasks = currentTargetLaneTasks.map((t, index) => ({
+        ...t,
+        position: index + 1
+      }));
+
+      // 6. Reconstruct the full tasks array with updated positions
+      const finalOptimisticTasks = [
+        ...newTasks.filter(t => t.laneId !== originalLaneId && t.laneId !== targetLaneId), // Tasks not in affected lanes
+        ...currentSourceLaneTasks,
+        ...currentTargetLaneTasks
+      ];
+
+      setTasks(finalOptimisticTasks); // Update UI immediately
+
+      // --- DATABASE UPDATE (ASYNC) ---
+      try {
+        // Collect all tasks that need a DB update
+        const tasksToUpdateInDb: { id: string; lane_id: string; status: string; position: number }[] = [];
+
+        // Add the moved task
+        tasksToUpdateInDb.push({
+          id: updatedTaskToMove.id,
+          lane_id: updatedTaskToMove.laneId,
+          status: updatedTaskToMove.status,
+          position: updatedTaskToMove.position
+        });
+
+        // Add tasks from source lane that changed position
+        currentSourceLaneTasks.forEach(t => {
+          const original = tasks.find(ot => ot.id === t.id);
+          if (original && original.position !== t.position) {
+            tasksToUpdateInDb.push({
+              id: t.id,
+              lane_id: t.laneId,
+              status: t.status, // Status won't change for tasks within the same lane
+              position: t.position
+            });
+          }
+        });
+
+        // Add tasks from target lane that changed position (excluding the moved task, already added)
+        currentTargetLaneTasks.forEach(t => {
+          if (t.id !== taskId) { // Exclude the moved task as it's already added
+            const original = tasks.find(ot => ot.id === t.id);
+            if (original && original.position !== t.position) {
+              tasksToUpdateInDb.push({
+                id: t.id,
+                lane_id: t.laneId,
+                status: t.status,
+                position: t.position
+              });
+            }
+          }
+        });
+
+        // Perform all database updates
+        for (const taskDbUpdate of tasksToUpdateInDb) {
+          await supabase
+            .from('tasks')
+            .update({
+              lane_id: taskDbUpdate.lane_id,
+              status: taskDbUpdate.status,
+              position: taskDbUpdate.position
+            })
+            .eq('id', taskDbUpdate.id);
+        }
+
+      } catch (dbError) {
+        console.error('Failed to update task positions in database:', dbError);
+        setError('Failed to save changes to the database. Reverting UI.');
+        // --- ROLLBACK UI ---
+        // Revert to the state before the optimistic update
+        // A simple refetch is the most robust way to rollback to a consistent state from DB
+        await fetchKanbanData();
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to move task');
-      throw err;
+      // No explicit rollback here, as the inner catch handles DB errors and reverts.
+      // This outer catch would be for errors before the optimistic update or unexpected ones.
     }
   };
 
